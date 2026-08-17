@@ -3,12 +3,8 @@ cmake_minimum_required(VERSION 3.22.1)
 project(Winlator)
 
 # ============================================================
-# Global compiler configuration
+# Compiler configuration
 # ============================================================
-
-# Disable clang-tidy (AGP enables it by default but its include
-# paths don't work with NDK cross-compilation for the lsfg-vk
-# dependency).
 
 set(CMAKE_C_FLAGS
         "${CMAKE_C_FLAGS} -O2 -Wno-unused-function -Wimplicit-function-declaration"
@@ -27,13 +23,11 @@ add_subdirectory(patchelf)
 add_subdirectory(adrenotools)
 
 # lsfg-vk is built separately by build-lsfg.yml
-# and its .so is copied to jniLibs.
-#
 # add_subdirectory(lsfg-vk)
 
 
 # ============================================================
-# Main Winlator native library
+# Main Winlator shared library
 # ============================================================
 
 add_library(winlator SHARED
@@ -46,7 +40,7 @@ add_library(winlator SHARED
         xr/math.c
         xr/renderer.c
 
-        # Winlator native components
+        # Winlator native
         winlator/drawable.c
         winlator/gpu_image.c
         winlator/sysvshared_memory.c
@@ -55,8 +49,9 @@ add_library(winlator SHARED
         winlator/vulkan.c
         winlator/perf_turbo.c
 
-        # Memory information
+        # Memory system
         memory.cpp
+        memory_bridge.cpp
 )
 
 target_compile_options(winlator PRIVATE
@@ -64,7 +59,10 @@ target_compile_options(winlator PRIVATE
         -Wextra
 )
 
-# Allow memory.cpp to include memory.h
+target_compile_features(winlator PRIVATE
+        cxx_std_17
+)
+
 target_include_directories(winlator PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
 )
@@ -83,7 +81,7 @@ target_link_libraries(winlator
 
 
 # ============================================================
-# DrawableBufferPool native heap
+# DrawableBufferPool
 # ============================================================
 
 add_library(drawablepool SHARED
@@ -231,7 +229,7 @@ target_link_libraries(direct_scanout
 
 
 # ============================================================
-# PulseAudio sink controller
+# PulseAudio sink
 # ============================================================
 
 add_library(pasink SHARED
