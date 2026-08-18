@@ -1008,6 +1008,11 @@ public class HudMetrics {
         public final long ramTotalBytes;
         public final float ramPercent;     // 0..100
         public final Long vramUsedBytes;   // bytes or null
+        // Combined memory = Android RAM + GPU VRAM. The HUD intentionally combines
+        // both pools so a 3.5 GiB RAM + 8.0 GiB VRAM device is shown as 11.5 GiB
+        // total, while the compact HUD rounds that total to 12 GiB.
+        public final long combinedMemoryUsedBytes;
+        public final long combinedMemoryTotalBytes;
         public final Battery battery;      // never null
         // ---- Mega-only extras ----
         public final int[] perCorePercent;  // per-core 0..100, -1 unknown (never null; may be empty)
@@ -1019,7 +1024,8 @@ public class HudMetrics {
 
         Snapshot(Integer cpuPercent, Integer gpuPercent, Integer cpuClockMhz, Integer gpuClockMhz,
                  Integer cpuTempC, Integer gpuTempC, long ramUsedBytes, long ramTotalBytes,
-                 float ramPercent, Long vramUsedBytes, Battery battery,
+                 float ramPercent, Long vramUsedBytes, long combinedMemoryUsedBytes,
+                 long combinedMemoryTotalBytes, Battery battery,
                  int[] perCorePercent, int[] perCoreClockMhz, Long swapUsedBytes, Long swapTotalBytes,
                  Long netDownBps, Long netUpBps) {
             this.cpuPercent = cpuPercent;
@@ -1032,6 +1038,8 @@ public class HudMetrics {
             this.ramTotalBytes = ramTotalBytes;
             this.ramPercent = ramPercent;
             this.vramUsedBytes = vramUsedBytes;
+            this.combinedMemoryUsedBytes = Math.max(0L, combinedMemoryUsedBytes);
+            this.combinedMemoryTotalBytes = Math.max(0L, combinedMemoryTotalBytes);
             this.battery = battery;
             this.perCorePercent = perCorePercent != null ? perCorePercent : new int[0];
             this.perCoreClockMhz = perCoreClockMhz != null ? perCoreClockMhz : new int[0];
@@ -1044,6 +1052,35 @@ public class HudMetrics {
         public String ramUsedText() { return formatBytesGb(ramUsedBytes); }
         public String ramTotalText() { return formatBytesGb(ramTotalBytes); }
         public String vramText() { return vramUsedBytes == null ? null : formatGiB(vramUsedBytes); }
+
+        /** RAM + VRAM used, e.g. "2.6 + 1.7 = 4.3 GiB". */
+        public String combinedMemoryUsedText() {
+            return formatMemoryBreakdown(ramUsedBytes, vramUsedBytes, combinedMemoryUsedBytes);
+        }
+
+        /** RAM + VRAM total, e.g. "3.5 + 8.0 = 11.5 GiB". */
+        public String combinedMemoryTotalText(Long vramTotalBytes) {
+            return formatMemoryBreakdown(ramTotalBytes, vramTotalBytes, combinedMemoryTotalBytes);
+        }
+
+        /** Compact HUD form. 11.5 GiB is intentionally rounded to 12GiB. */
+        public String combinedMemoryHudText() {
+            double usedGiB = combinedMemoryUsedBytes / (1024.0 * 1024.0 * 1024.0);
+            double totalGiB = combinedMemoryTotalBytes / (1024.0 * 1024.0 * 1024.0);
+            if (combinedMemoryTotalBytes <= 0L) return formatGiB(combinedMemoryUsedBytes);
+            return String.format(Locale.US, "%.1f / %.0fGiB", usedGiB, totalGiB);
+        }
+
+        private static String formatMemoryBreakdown(long firstBytes, Long secondBytes, long combinedBytes) {
+            double first = firstBytes / (1024.0 * 1024.0 * 1024.0);
+            double second = secondBytes == null ? 0.0
+                    : secondBytes / (1024.0 * 1024.0 * 1024.0);
+            double total = combinedBytes / (1024.0 * 1024.0 * 1024.0);
+            if (secondBytes == null) {
+                return String.format(Locale.US, "%.1f GiB", total);
+            }
+            return String.format(Locale.US, "%.1f + %.1f = %.1f GiB", first, second, total);
+        }
         public String swapUsedText() { return swapUsedBytes == null ? null : formatBytesGb(swapUsedBytes); }
         public String swapTotalText() { return swapTotalBytes == null ? null : formatBytesGb(swapTotalBytes); }
 
@@ -1075,6 +1112,9 @@ public class HudMetrics {
         }
 
         Long vram = getVramUsedBytes();
+        Long vramTotal = readFirstReadableLong(VRAM_TOTAL_PATHS);
+        long combinedUsed = usedBytes + (vram != null ? Math.max(0L, vram) : 0L);
+        long combinedTotal = totalBytes + (vramTotal != null ? Math.max(0L, vramTotal) : 0L);
         Battery battery = collectBattery();
 
         int[] perCorePct = readPerCorePercent();
@@ -1083,7 +1123,7 @@ public class HudMetrics {
         long[] net = readNetRateBps();
 
         return new Snapshot(cpu, gpu, cpuClk, gpuClk, cpuTemp, gpuTemp,
-            usedBytes, totalBytes, ramPct, vram, battery,
+            usedBytes, totalBytes, ramPct, vram, combinedUsed, combinedTotal, battery,
             perCorePct, perCoreClk,
             swap == null ? null : swap[0], swap == null ? null : swap[1],
             net == null ? null : net[0], net == null ? null : net[1]);
@@ -1319,6 +1359,16 @@ public class HudMetrics {
         // ---- Memory ----
         metricHit(sb, "RAM", s.ramUsedText() + " / " + s.ramTotalText()
                 + " (" + Math.round(s.ramPercent) + "%)", "ActivityManager.MemoryInfo");
+
+        // Combined RAM + VRAM presentation requested for the HUD.
+        Long diagnosticVramTotal = readFirstReadableLong(VRAM_TOTAL_PATHS);
+        sb.append("MEMÓRIA USADA:\n")
+          .append(s.combinedMemoryUsedText()).append('\n');
+        sb.append("MEMÓRIA TOTAL:\n")
+          .append(s.combinedMemoryTotalText(diagnosticVramTotal)).append('\n');
+        sb.append("HUD:\n")
+          .append(s.combinedMemoryHudText()).append('\n');
+
         if (s.swapUsedBytes != null)
             metricHit(sb, "SWAP", s.swapUsedText() + " / " + s.swapTotalText(), "/proc/meminfo");
         else
