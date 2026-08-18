@@ -1,4 +1,4 @@
-package com.titanpc.system;
+package com.winlator.star;
 
 import android.os.Bundle;
 import android.widget.Button;
