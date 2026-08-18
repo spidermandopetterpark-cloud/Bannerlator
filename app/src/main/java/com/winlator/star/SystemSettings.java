@@ -101,7 +101,7 @@ public class SystemSettings extends AppCompatActivity {
                 (buttonView, checked) -> {
 
                     if (checked) {
-                        int available = nativeGetAvailableMemoryMB();
+                        long available = nativeGetAvailableMemoryMB();
 
                         ramMB = Math.min(
                                 Math.max(1024, available / 2),
