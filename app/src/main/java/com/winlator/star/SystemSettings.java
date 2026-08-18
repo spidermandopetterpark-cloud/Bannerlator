@@ -8,7 +8,7 @@ import android.widget.TextView;
 
 import androidx.appcompat.app.AppCompatActivity;
 
-import com.titanpc.R;
+import com.winlator.star.R;
 
 public class SystemSettings extends AppCompatActivity {
 
