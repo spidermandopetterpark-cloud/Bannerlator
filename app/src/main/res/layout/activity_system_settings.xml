@@ -1,64 +1,75 @@
 <?xml version="1.0" encoding="utf-8"?>
 
-<LinearLayout
+<ScrollView
     xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:padding="24dp">
+    android:layout_height="match_parent">
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="System"
-        android:textSize="28sp"
-        android:textStyle="bold"/>
-
-    <TextView
-        android:id="@+id/availableText"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="20dp"
-        android:text="RAM disponível"/>
-
-    <TextView
-        android:id="@+id/ramText"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="30dp"
-        android:text="RAM: 2048 MB"
-        android:textSize="18sp"/>
-
-    <SeekBar
-        android:id="@+id/ramSeekBar"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"/>
-
-    <TextView
-        android:id="@+id/swapText"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="30dp"
-        android:text="Swap: 2048 MB"
-        android:textSize="18sp"/>
-
-    <SeekBar
-        android:id="@+id/swapSeekBar"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"/>
-
-    <Switch
-        android:id="@+id/autoMemory"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="25dp"
-        android:text="Usar RAM + Swap automaticamente"/>
+        android:orientation="vertical"
+        android:padding="24dp">
 
-    <Button
-        android:id="@+id/applyButton"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="30dp"
-        android:text="Aplicar"/>
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="System"
+            android:textSize="28sp"
+            android:textStyle="bold"/>
 
-</LinearLayout>
+        <TextView
+            android:id="@+id/availableText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="RAM disponível: 0 MB"
+            android:textSize="16sp"/>
+
+        <TextView
+            android:id="@+id/ramText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="30dp"
+            android:text="RAM: 2048 MB"
+            android:textSize="18sp"/>
+
+        <SeekBar
+            android:id="@+id/ramSeekBar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="4096"
+            android:progress="2048"/>
+
+        <TextView
+            android:id="@+id/swapText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="30dp"
+            android:text="Swap: 2048 MB"
+            android:textSize="18sp"/>
+
+        <SeekBar
+            android:id="@+id/swapSeekBar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="8192"
+            android:progress="2048"/>
+
+        <Switch
+            android:id="@+id/autoMemory"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="Usar RAM + Swap automaticamente"/>
+
+        <Button
+            android:id="@+id/applyButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="30dp"
+            android:text="Aplicar"/>
+
+    </LinearLayout>
+
+</ScrollView>
