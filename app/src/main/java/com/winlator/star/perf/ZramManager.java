@@ -1,536 +1,900 @@
 package com.winlator.star.perf;
 
-import android.content.ComponentName;
-import android.content.ServiceConnection;
-import android.os.IBinder;
-import android.os.ParcelFileDescriptor;
+import android.content.Context;
+import android.content.pm.PackageManager;
+import android.os.Build;
+import android.os.SystemClock;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileReader;
 import java.io.InputStreamReader;
+import java.util.Locale;
 
 import rikka.shizuku.Shizuku;
-import rikka.shizuku.Shizuku.UserServiceArgs;
 
+/**
+ * ZramManager
+ *
+ * Gerenciamento de ZRAM através do Shizuku.
+ *
+ * Não depende de:
+ * - ZramUserServiceStub
+ * - UserService customizado
+ * - libsu para operações Shizuku
+ *
+ * O Shizuku precisa estar ativo e autorizado.
+ */
 public final class ZramManager {
 
-    private static final String ZRAM =
+    private static final String TAG = "ZramManager";
+
+    private static final String ZRAM_BASE =
             "/sys/block/zram0";
 
-    private static final String ZRAM_DEV =
+    private static final String ZRAM_DISKSIZE =
+            ZRAM_BASE + "/disksize";
+
+    private static final String ZRAM_RESET =
+            ZRAM_BASE + "/reset";
+
+    private static final String ZRAM_COMP_ALGO =
+            ZRAM_BASE + "/comp_algorithm";
+
+    private static final String ZRAM_MAX_COMP_STREAMS =
+            ZRAM_BASE + "/max_comp_streams";
+
+    private static final String ZRAM_MEM_LIMIT =
+            ZRAM_BASE + "/mem_limit";
+
+    private static final String PROC_SWAPS =
+            "/proc/swaps";
+
+    private static final String DEV_BLOCK_ZRAM =
             "/dev/block/zram0";
 
-    private static final long EIGHT_GIB =
-            8L * 1024L * 1024L * 1024L;
+    private static final String DEV_ZRAM =
+            "/dev/zram0";
 
-    private static final int SHIZUKU_PERMISSION_REQUEST_CODE = 1001;
+    private final Context context;
 
-    private static ZramUserService service;
+    public ZramManager(Context context) {
+        if (context == null) {
+            throw new IllegalArgumentException(
+                    "context == null"
+            );
+        }
 
-    private static boolean connected = false;
-
-    private static final ServiceConnection CONNECTION =
-            new ServiceConnection() {
-
-                @Override
-                public void onServiceConnected(
-                        ComponentName name,
-                        IBinder binder) {
-
-                    service =
-                            ZramUserService.Stub.asInterface(
-                                    binder
-                            );
-
-                    connected = true;
-                }
-
-                @Override
-                public void onServiceDisconnected(
-                        ComponentName name) {
-
-                    connected = false;
-                    service = null;
-                }
-            };
-
-    private ZramManager() {
+        this.context =
+                context.getApplicationContext();
     }
 
     // ============================================================
     // SHIZUKU
     // ============================================================
 
-    public static boolean isShizukuAvailable() {
-
+    public boolean isShizukuAvailable() {
         try {
             return Shizuku.pingBinder();
-        } catch (Throwable e) {
+        } catch (Throwable ignored) {
             return false;
         }
     }
 
-    public static boolean hasShizukuPermission() {
-
-        if (!isShizukuAvailable()) {
-            return false;
-        }
-
+    public boolean hasShizukuPermission() {
         try {
+            if (!isShizukuAvailable()) {
+                return false;
+            }
+
+            if (Build.VERSION.SDK_INT < 23) {
+                return false;
+            }
 
             return Shizuku.checkSelfPermission()
-                    == android.content.pm.PackageManager.PERMISSION_GRANTED;
+                    == PackageManager.PERMISSION_GRANTED;
 
-        } catch (Throwable e) {
+        } catch (Throwable ignored) {
             return false;
         }
     }
 
-    public static void requestPermission() {
+    public boolean canUseShizuku() {
+        return isShizukuAvailable()
+                && hasShizukuPermission();
+    }
 
-        if (!isShizukuAvailable()) {
-            return;
-        }
-
-        if (hasShizukuPermission()) {
-            return;
-        }
-
+    public void requestShizukuPermission(
+            int requestCode
+    ) {
         try {
+            if (!isShizukuAvailable()) {
+                return;
+            }
 
-            Shizuku.requestPermission(
-                    SHIZUKU_PERMISSION_REQUEST_CODE
-            );
+            if (Build.VERSION.SDK_INT >= 23
+                    && Shizuku.checkSelfPermission()
+                    != PackageManager.PERMISSION_GRANTED) {
+
+                Shizuku.requestPermission(
+                        requestCode
+                );
+            }
 
         } catch (Throwable ignored) {
         }
     }
 
     // ============================================================
-    // USER SERVICE
+    // ZRAM STATUS
     // ============================================================
 
-    public static boolean connect() {
-
-        if (!isShizukuAvailable()) {
-            return false;
-        }
-
-        if (!hasShizukuPermission()) {
-            requestPermission();
-            return false;
-        }
-
-        if (connected && service != null) {
-            return true;
-        }
-
+    public boolean isZramAvailable() {
         try {
+            if (new File(ZRAM_BASE).exists()) {
+                return true;
+            }
 
-            UserServiceArgs args =
-                    new UserServiceArgs(
-                            new ComponentName(
-                                    "com.winlator.star",
-                                    ZramUserService.class.getName()
-                            )
-                    )
-                    .daemon(false)
-                    .version(1)
-                    .tag("BannerlatorZram");
+            String result =
+                    execute(
+                            "test -d '" +
+                            ZRAM_BASE +
+                            "'"
+                    );
 
-            Shizuku.bindUserService(
-                    args,
-                    CONNECTION
-            );
+            return lastExitCode == 0
+                    && result != null;
 
-            return true;
-
-        } catch (Throwable e) {
-
+        } catch (Throwable ignored) {
             return false;
         }
     }
 
-    // ============================================================
-    // EXECUTAR COMANDO
-    // ============================================================
+    public boolean isZramSwapEnabled() {
 
-    private static CommandResult execute(
-            String command
-    ) {
-
-        if (!connect()) {
-
-            return new CommandResult(
-                    false,
-                    "",
-                    "Shizuku não disponível"
-            );
-        }
-
-        if (service == null) {
-
-            return new CommandResult(
-                    false,
-                    "",
-                    "ZramUserService não conectado"
-            );
-        }
-
-        try {
-
-            return service.execute(command);
-
-        } catch (Throwable e) {
-
-            return new CommandResult(
-                    false,
-                    "",
-                    e.getMessage()
-            );
-        }
-    }
-
-    // ============================================================
-    // DETECTAR ZRAM
-    // ============================================================
-
-    public static boolean exists() {
-
-        return new File(ZRAM).exists();
-    }
-
-    public static long getConfiguredSizeBytes() {
-
-        File file =
-                new File(
-                        ZRAM + "/disksize"
+        CommandResult result =
+                executeCommand(
+                        "cat " + PROC_SWAPS
                 );
 
-        if (!file.exists()) {
+        if (!result.success) {
+            return false;
+        }
+
+        String output =
+                result.output.toLowerCase(
+                        Locale.US
+                );
+
+        return output.contains(
+                    "/dev/block/zram0"
+                )
+                || output.contains(
+                    "/dev/zram0"
+                )
+                || output.contains(
+                    "zram0"
+                );
+    }
+
+    public long getZramSize() {
+
+        String value =
+                readFile(
+                        ZRAM_DISKSIZE
+                );
+
+        if (value == null) {
             return 0L;
         }
 
         try {
-
-            BufferedReader reader =
-                    new BufferedReader(
-                            new FileReader(file)
-                    );
-
-            String value =
-                    reader.readLine();
-
-            reader.close();
-
-            if (value == null) {
-                return 0L;
-            }
-
             return Long.parseLong(
                     value.trim()
             );
 
-        } catch (Exception e) {
-
+        } catch (NumberFormatException ignored) {
             return 0L;
         }
     }
 
-    public static boolean is8GiB() {
+    public long getZramSizeMiB() {
 
-        return getConfiguredSizeBytes()
-                == EIGHT_GIB;
+        long bytes =
+                getZramSize();
+
+        if (bytes <= 0) {
+            return 0L;
+        }
+
+        return bytes
+                / 1024L
+                / 1024L;
     }
 
-    // ============================================================
-    // ALGORITMO
-    // ============================================================
+    public String getCompressionAlgorithm() {
 
-    public static String getCompressionAlgorithms() {
-
-        File file =
-                new File(
-                        ZRAM
-                                + "/comp_algorithm"
+        String value =
+                readFile(
+                        ZRAM_COMP_ALGO
                 );
 
-        if (!file.exists()) {
+        if (value == null
+                || value.trim().isEmpty()) {
             return "";
         }
 
-        try {
-
-            BufferedReader reader =
-                    new BufferedReader(
-                            new FileReader(file)
-                    );
-
-            String result =
-                    reader.readLine();
-
-            reader.close();
-
-            return result == null
-                    ? ""
-                    : result;
-
-        } catch (Exception e) {
-
-            return "";
-        }
-    }
-
-    private static String chooseAlgorithm() {
-
-        String algorithms =
-                getCompressionAlgorithms();
-
-        if (algorithms.contains("zstd")) {
-            return "zstd";
-        }
-
-        if (algorithms.contains("lz4")) {
-            return "lz4";
-        }
-
-        if (algorithms.contains("lzo")) {
-            return "lzo";
-        }
-
-        return "";
-    }
-
-    // ============================================================
-    // CONFIGURAR 8 GiB
-    // ============================================================
-
-    public static boolean configure8GiB() {
-
-        if (!isShizukuAvailable()) {
-            return false;
-        }
-
-        if (!hasShizukuPermission()) {
-            requestPermission();
-            return false;
-        }
-
-        if (!exists()) {
-            return false;
-        }
-
-        /*
-         * Desativa o swap atual.
-         */
-        CommandResult swapOff =
-                execute(
-                        "swapoff "
-                                + ZRAM_DEV
+        String[] algorithms =
+                value.trim().split(
+                        "\\s+"
                 );
 
-        /*
-         * Reset da ZRAM.
-         */
+        for (String algorithm :
+                algorithms) {
+
+            if (algorithm.startsWith("[")
+                    && algorithm.endsWith("]")) {
+
+                return algorithm.substring(
+                        1,
+                        algorithm.length() - 1
+                );
+            }
+        }
+
+        return value.trim();
+    }
+
+    public String getCompressionAlgorithms() {
+        return readFile(
+                ZRAM_COMP_ALGO
+        );
+    }
+
+    // ============================================================
+    // ZRAM SIZE
+    // ============================================================
+
+    public boolean setZramSizeMiB(
+            long mib
+    ) {
+
+        if (mib <= 0) {
+            return false;
+        }
+
+        if (mib > Long.MAX_VALUE / 1024L / 1024L) {
+            return false;
+        }
+
+        long bytes =
+                mib * 1024L * 1024L;
+
+        return setZramSizeBytes(
+                bytes
+        );
+    }
+
+    public boolean setZramSizeBytes(
+            long bytes
+    ) {
+
+        if (bytes <= 0) {
+            return false;
+        }
+
+        if (!canUseShizuku()) {
+            return false;
+        }
+
+        if (!isZramAvailable()) {
+            return false;
+        }
+
+        if (isZramSwapEnabled()) {
+
+            if (!disableSwap()) {
+                return false;
+            }
+        }
+
         CommandResult reset =
-                execute(
-                        "sh -c 'echo 1 > "
-                                + ZRAM
-                                + "/reset'"
+                executeCommand(
+                        "echo 1 > " +
+                        ZRAM_RESET
                 );
 
-        /*
-         * Escolhe algoritmo.
-         */
-        String algorithm =
-                chooseAlgorithm();
-
-        if (!algorithm.isEmpty()) {
-
-            execute(
-                    "sh -c 'echo "
-                            + algorithm
-                            + " > "
-                            + ZRAM
-                            + "/comp_algorithm'"
-            );
+        if (!reset.success) {
+            return false;
         }
 
-        /*
-         * 8 GiB = 8589934592 bytes
-         */
         CommandResult size =
-                execute(
-                        "sh -c 'echo "
-                                + EIGHT_GIB
-                                + " > "
-                                + ZRAM
-                                + "/disksize'"
+                executeCommand(
+                        "echo " +
+                        bytes +
+                        " > " +
+                        ZRAM_DISKSIZE
                 );
 
         if (!size.success) {
-
             return false;
         }
 
-        /*
-         * Formata como swap.
-         */
-        CommandResult makeSwap =
-                execute(
-                        "mkswap "
-                                + ZRAM_DEV
+        return getZramSize() == bytes;
+    }
+
+    // ============================================================
+    // COMPRESSION
+    // ============================================================
+
+    public boolean setCompressionAlgorithm(
+            String algorithm
+    ) {
+
+        if (algorithm == null) {
+            return false;
+        }
+
+        String safeAlgorithm =
+                sanitizeValue(
+                        algorithm
                 );
 
-        if (!makeSwap.success) {
-
+        if (safeAlgorithm.isEmpty()) {
             return false;
         }
 
-        /*
-         * Ativa.
-         */
-        CommandResult swapOn =
-                execute(
-                        "swapon "
-                                + ZRAM_DEV
+        if (!canUseShizuku()) {
+            return false;
+        }
+
+        if (!isZramAvailable()) {
+            return false;
+        }
+
+        CommandResult result =
+                executeCommand(
+                        "echo '" +
+                        safeAlgorithm +
+                        "' > " +
+                        ZRAM_COMP_ALGO
                 );
 
-        if (!swapOn.success) {
-
+        if (!result.success) {
             return false;
         }
 
-        /*
-         * Confirma no sysfs.
-         */
-        return is8GiB();
+        String current =
+                getCompressionAlgorithm();
+
+        return safeAlgorithm.equalsIgnoreCase(
+                current
+        );
+    }
+
+    public boolean setMaxCompressionStreams(
+            int streams
+    ) {
+
+        if (streams <= 0) {
+            return false;
+        }
+
+        if (!canUseShizuku()) {
+            return false;
+        }
+
+        if (!isZramAvailable()) {
+            return false;
+        }
+
+        CommandResult result =
+                executeCommand(
+                        "echo " +
+                        streams +
+                        " > " +
+                        ZRAM_MAX_COMP_STREAMS
+                );
+
+        return result.success;
+    }
+
+    public boolean setMemoryLimitMiB(
+            long mib
+    ) {
+
+        if (mib <= 0) {
+            return false;
+        }
+
+        if (mib >
+                Long.MAX_VALUE / 1024L / 1024L) {
+            return false;
+        }
+
+        if (!canUseShizuku()) {
+            return false;
+        }
+
+        long bytes =
+                mib * 1024L * 1024L;
+
+        CommandResult result =
+                executeCommand(
+                        "echo " +
+                        bytes +
+                        " > " +
+                        ZRAM_MEM_LIMIT
+                );
+
+        return result.success;
+    }
+
+    // ============================================================
+    // SWAP
+    // ============================================================
+
+    public boolean enableSwap() {
+
+        if (!canUseShizuku()) {
+            return false;
+        }
+
+        if (!isZramAvailable()) {
+            return false;
+        }
+
+        if (getZramSize() <= 0) {
+            return false;
+        }
+
+        if (isZramSwapEnabled()) {
+            return true;
+        }
+
+        String command =
+                "if [ -e " +
+                DEV_BLOCK_ZRAM +
+                " ]; then " +
+                "DEV=" +
+                DEV_BLOCK_ZRAM +
+                "; " +
+                "elif [ -e " +
+                DEV_ZRAM +
+                " ]; then " +
+                "DEV=" +
+                DEV_ZRAM +
+                "; " +
+                "else exit 1; fi; " +
+                "mkswap \"$DEV\" >/dev/null 2>&1 || exit 1; " +
+                "swapon \"$DEV\"";
+
+        CommandResult result =
+                executeCommand(
+                        command
+                );
+
+        SystemClock.sleep(150);
+
+        return result.success
+                && isZramSwapEnabled();
+    }
+
+    public boolean disableSwap() {
+
+        if (!canUseShizuku()) {
+            return false;
+        }
+
+        String command =
+                "if [ -e " +
+                DEV_BLOCK_ZRAM +
+                " ]; then " +
+                "swapoff " +
+                DEV_BLOCK_ZRAM +
+                " 2>/dev/null; " +
+                "fi; " +
+                "if [ -e " +
+                DEV_ZRAM +
+                " ]; then " +
+                "swapoff " +
+                DEV_ZRAM +
+                " 2>/dev/null; " +
+                "fi";
+
+        executeCommand(
+                command
+        );
+
+        SystemClock.sleep(150);
+
+        return !isZramSwapEnabled();
+    }
+
+    public boolean reset() {
+
+        if (!canUseShizuku()) {
+            return false;
+        }
+
+        disableSwap();
+
+        if (!isZramAvailable()) {
+            return false;
+        }
+
+        CommandResult result =
+                executeCommand(
+                        "echo 1 > " +
+                        ZRAM_RESET
+                );
+
+        if (!result.success) {
+            return false;
+        }
+
+        SystemClock.sleep(150);
+
+        return getZramSize() == 0;
+    }
+
+    // ============================================================
+    // CONFIGURAÇÃO COMPLETA
+    // ============================================================
+
+    public boolean configure(
+            long sizeMiB,
+            String algorithm
+    ) {
+
+        if (!canUseShizuku()) {
+            return false;
+        }
+
+        if (!isZramAvailable()) {
+            return false;
+        }
+
+        if (!disableSwap()) {
+            /*
+             * Se não estava ativo, disableSwap()
+             * pode retornar true.
+             */
+            if (isZramSwapEnabled()) {
+                return false;
+            }
+        }
+
+        if (!setZramSizeMiB(sizeMiB)) {
+            return false;
+        }
+
+        if (algorithm != null
+                && !algorithm.trim().isEmpty()) {
+
+            if (!setCompressionAlgorithm(
+                    algorithm
+            )) {
+                return false;
+            }
+        }
+
+        return enableSwap();
+    }
+
+    // ============================================================
+    // EXECUÇÃO SHIZUKU
+    // ============================================================
+
+    private volatile int lastExitCode =
+            -1;
+
+    /**
+     * Compatibilidade com chamadas existentes.
+     *
+     * Retorna apenas stdout.
+     */
+    public String execute(
+            String command
+    ) {
+
+        CommandResult result =
+                executeCommand(
+                        command
+                );
+
+        lastExitCode =
+                result.exitCode;
+
+        return result.output;
+    }
+
+    private CommandResult executeCommand(
+            String command
+    ) {
+
+        if (command == null
+                || command.trim().isEmpty()) {
+
+            return new CommandResult(
+                    false,
+                    -1,
+                    ""
+            );
+        }
+
+        if (!canUseShizuku()) {
+
+            return new CommandResult(
+                    false,
+                    -1,
+                    ""
+            );
+        }
+
+        Process process =
+                null;
+
+        BufferedReader reader =
+                null;
+
+        try {
+
+            String[] args = {
+                    "sh",
+                    "-c",
+                    command
+            };
+
+            process =
+                    Shizuku.newProcess(
+                            args,
+                            null,
+                            null
+                    );
+
+            reader =
+                    new BufferedReader(
+                            new InputStreamReader(
+                                    process.getInputStream()
+                            )
+                    );
+
+            StringBuilder output =
+                    new StringBuilder();
+
+            String line;
+
+            while (
+                    (line = reader.readLine())
+                            != null
+            ) {
+
+                output
+                        .append(line)
+                        .append('\n');
+            }
+
+            int exitCode =
+                    process.waitFor();
+
+            lastExitCode =
+                    exitCode;
+
+            String text =
+                    output
+                            .toString()
+                            .trim();
+
+            return new CommandResult(
+                    exitCode == 0,
+                    exitCode,
+                    text
+            );
+
+        } catch (Throwable ignored) {
+
+            lastExitCode = -1;
+
+            return new CommandResult(
+                    false,
+                    -1,
+                    ""
+            );
+
+        } finally {
+
+            if (reader != null) {
+
+                try {
+                    reader.close();
+                } catch (Throwable ignored) {
+                }
+            }
+
+            if (process != null) {
+
+                try {
+                    process.destroy();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+
+    // ============================================================
+    // FILE READ
+    // ============================================================
+
+    public String readFile(
+            String path
+    ) {
+
+        if (path == null
+                || path.trim().isEmpty()) {
+            return null;
+        }
+
+        String safePath =
+                sanitizePath(
+                        path
+                );
+
+        if (safePath.isEmpty()) {
+            return null;
+        }
+
+        CommandResult result =
+                executeCommand(
+                        "cat '" +
+                        safePath +
+                        "' 2>/dev/null"
+                );
+
+        if (!result.success
+                || result.output.isEmpty()) {
+
+            return null;
+        }
+
+        return result.output.trim();
+    }
+
+    // ============================================================
+    // UTILITÁRIOS
+    // ============================================================
+
+    private String sanitizeValue(
+            String value
+    ) {
+
+        return value
+                .trim()
+                .replace("'", "")
+                .replace("\"", "")
+                .replace(";", "")
+                .replace("&", "")
+                .replace("|", "")
+                .replace("$", "")
+                .replace("`", "")
+                .replace("\n", "")
+                .replace("\r", "");
+    }
+
+    private String sanitizePath(
+            String path
+    ) {
+
+        return path
+                .trim()
+                .replace("'", "")
+                .replace("\"", "")
+                .replace(";", "")
+                .replace("&", "")
+                .replace("|", "")
+                .replace("$", "")
+                .replace("`", "")
+                .replace("\n", "")
+                .replace("\r", "");
+    }
+
+    private static final class CommandResult {
+
+        final boolean success;
+
+        final int exitCode;
+
+        final String output;
+
+        CommandResult(
+                boolean success,
+                int exitCode,
+                String output
+        ) {
+
+            this.success =
+                    success;
+
+            this.exitCode =
+                    exitCode;
+
+            this.output =
+                    output == null
+                            ? ""
+                            : output;
+        }
     }
 
     // ============================================================
     // STATUS
     // ============================================================
 
-    public static String getStatus() {
+    public String getStatus() {
 
-        if (!isShizukuAvailable()) {
-
-            return "Shizuku: OFF";
-        }
-
-        if (!hasShizukuPermission()) {
-
-            return "Shizuku: sem permissão";
-        }
-
-        if (!exists()) {
-
-            return "ZRAM: não encontrada";
-        }
-
-        long size =
-                getConfiguredSizeBytes();
-
-        if (size <= 0) {
-
-            return "ZRAM: desativada";
-        }
-
-        return "ZRAM: "
-                + MemoryInfo.formatBytes(size);
-    }
-
-    public static String getDetailedStatus() {
-
-        StringBuilder result =
+        StringBuilder status =
                 new StringBuilder();
 
-        result.append("BANNERLATOR ZRAM\n");
-        result.append("====================\n");
+        status.append(
+                "ZRAM\n"
+        );
 
-        result.append("Shizuku: ")
-                .append(
-                        isShizukuAvailable()
-                                ? "OK"
-                                : "OFF"
-                )
-                .append("\n");
+        status.append(
+                "====================\n"
+        );
 
-        result.append("Permissão: ")
-                .append(
-                        hasShizukuPermission()
-                                ? "OK"
-                                : "NEGADA"
-                )
-                .append("\n");
+        status.append(
+                "Shizuku: "
+        ).append(
+                isShizukuAvailable()
+                        ? "OK"
+                        : "OFF"
+        ).append('\n');
 
-        result.append("zram0: ")
-                .append(
-                        exists()
-                                ? "OK"
-                                : "NÃO ENCONTRADA"
-                )
-                .append("\n");
+        status.append(
+                "Permissão: "
+        ).append(
+                hasShizukuPermission()
+                        ? "OK"
+                        : "NEGADA"
+        ).append('\n');
 
-        long size =
-                getConfiguredSizeBytes();
+        status.append(
+                "ZRAM: "
+        ).append(
+                isZramAvailable()
+                        ? "OK"
+                        : "NÃO ENCONTRADA"
+        ).append('\n');
 
-        result.append("Tamanho: ")
-                .append(
-                        MemoryInfo.formatBytes(size)
-                )
-                .append("\n");
+        status.append(
+                "Tamanho: "
+        ).append(
+                getZramSizeMiB()
+        ).append(
+                " MiB\n"
+        );
 
-        result.append("Alvo: 8.0 GiB\n");
+        status.append(
+                "Algoritmo: "
+        ).append(
+                getCompressionAlgorithm()
+        ).append('\n');
 
-        result.append("Configuração: ")
-                .append(
-                        is8GiB()
-                                ? "8 GiB ATIVOS"
-                                : "NÃO CONFIGURADA"
-                )
-                .append("\n");
+        status.append(
+                "Swap: "
+        ).append(
+                isZramSwapEnabled()
+                        ? "ATIVO"
+                        : "INATIVO"
+        ).append('\n');
 
-        result.append("Algoritmos: ")
-                .append(
-                        getCompressionAlgorithms()
-                );
-
-        return result.toString();
+        return status.toString();
     }
 
     // ============================================================
-    // RESULTADO
+    // CONTEXT
     // ============================================================
 
-    public static final class CommandResult {
-
-        public final boolean success;
-        public final String output;
-        public final String error;
-
-        public CommandResult(
-                boolean success,
-                String output,
-                String error
-        ) {
-
-            this.success = success;
-            this.output = output;
-            this.error = error;
-        }
+    public Context getContext() {
+        return context;
     }
-
-    // ============================================================
-    // USER SERVICE
-    // ============================================================
-
-    public static class ZramUserService
-            extends ZramUserServiceStub {
-
-        public ZramUserService() {
-            super();
-        }
-    }
-    }
+}
