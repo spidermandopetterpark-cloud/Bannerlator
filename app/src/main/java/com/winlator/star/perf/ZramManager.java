@@ -1,34 +1,195 @@
 package com.winlator.star.perf;
 
+import android.content.ComponentName;
+import android.content.ServiceConnection;
+import android.os.IBinder;
+import android.os.ParcelFileDescriptor;
+
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileReader;
 import java.io.InputStreamReader;
-import java.util.ArrayList;
-import java.util.List;
+
+import rikka.shizuku.Shizuku;
+import rikka.shizuku.Shizuku.UserServiceArgs;
 
 public final class ZramManager {
 
-    private static final String ZRAM_DEVICE = "/dev/block/zram0";
-    private static final String ZRAM_SYS = "/sys/block/zram0";
+    private static final String ZRAM =
+            "/sys/block/zram0";
 
-    // 8 GiB
-    private static final long ZRAM_SIZE_BYTES =
+    private static final String ZRAM_DEV =
+            "/dev/block/zram0";
+
+    private static final long EIGHT_GIB =
             8L * 1024L * 1024L * 1024L;
+
+    private static final int SHIZUKU_PERMISSION_REQUEST_CODE = 1001;
+
+    private static ZramUserService service;
+
+    private static boolean connected = false;
+
+    private static final ServiceConnection CONNECTION =
+            new ServiceConnection() {
+
+                @Override
+                public void onServiceConnected(
+                        ComponentName name,
+                        IBinder binder) {
+
+                    service =
+                            ZramUserService.Stub.asInterface(
+                                    binder
+                            );
+
+                    connected = true;
+                }
+
+                @Override
+                public void onServiceDisconnected(
+                        ComponentName name) {
+
+                    connected = false;
+                    service = null;
+                }
+            };
 
     private ZramManager() {
     }
 
     // ============================================================
-    // ROOT
+    // SHIZUKU
     // ============================================================
 
-    public static boolean hasRoot() {
-        CommandResult result = execute(
-                "id"
-        );
+    public static boolean isShizukuAvailable() {
 
-        return result.success
-                && result.output.contains("uid=0");
+        try {
+            return Shizuku.pingBinder();
+        } catch (Throwable e) {
+            return false;
+        }
+    }
+
+    public static boolean hasShizukuPermission() {
+
+        if (!isShizukuAvailable()) {
+            return false;
+        }
+
+        try {
+
+            return Shizuku.checkSelfPermission()
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED;
+
+        } catch (Throwable e) {
+            return false;
+        }
+    }
+
+    public static void requestPermission() {
+
+        if (!isShizukuAvailable()) {
+            return;
+        }
+
+        if (hasShizukuPermission()) {
+            return;
+        }
+
+        try {
+
+            Shizuku.requestPermission(
+                    SHIZUKU_PERMISSION_REQUEST_CODE
+            );
+
+        } catch (Throwable ignored) {
+        }
+    }
+
+    // ============================================================
+    // USER SERVICE
+    // ============================================================
+
+    public static boolean connect() {
+
+        if (!isShizukuAvailable()) {
+            return false;
+        }
+
+        if (!hasShizukuPermission()) {
+            requestPermission();
+            return false;
+        }
+
+        if (connected && service != null) {
+            return true;
+        }
+
+        try {
+
+            UserServiceArgs args =
+                    new UserServiceArgs(
+                            new ComponentName(
+                                    "com.winlator.star",
+                                    ZramUserService.class.getName()
+                            )
+                    )
+                    .daemon(false)
+                    .version(1)
+                    .tag("BannerlatorZram");
+
+            Shizuku.bindUserService(
+                    args,
+                    CONNECTION
+            );
+
+            return true;
+
+        } catch (Throwable e) {
+
+            return false;
+        }
+    }
+
+    // ============================================================
+    // EXECUTAR COMANDO
+    // ============================================================
+
+    private static CommandResult execute(
+            String command
+    ) {
+
+        if (!connect()) {
+
+            return new CommandResult(
+                    false,
+                    "",
+                    "Shizuku não disponível"
+            );
+        }
+
+        if (service == null) {
+
+            return new CommandResult(
+                    false,
+                    "",
+                    "ZramUserService não conectado"
+            );
+        }
+
+        try {
+
+            return service.execute(command);
+
+        } catch (Throwable e) {
+
+            return new CommandResult(
+                    false,
+                    "",
+                    e.getMessage()
+            );
+        }
     }
 
     // ============================================================
@@ -37,22 +198,17 @@ public final class ZramManager {
 
     public static boolean exists() {
 
-        File zram = new File(ZRAM_SYS);
-
-        return zram.exists()
-                && zram.isDirectory();
+        return new File(ZRAM).exists();
     }
-
-    // ============================================================
-    // TAMANHO
-    // ============================================================
 
     public static long getConfiguredSizeBytes() {
 
-        File diskSize =
-                new File(ZRAM_SYS + "/disksize");
+        File file =
+                new File(
+                        ZRAM + "/disksize"
+                );
 
-        if (!diskSize.exists()) {
+        if (!file.exists()) {
             return 0L;
         }
 
@@ -60,10 +216,11 @@ public final class ZramManager {
 
             BufferedReader reader =
                     new BufferedReader(
-                            new java.io.FileReader(diskSize)
+                            new FileReader(file)
                     );
 
-            String value = reader.readLine();
+            String value =
+                    reader.readLine();
 
             reader.close();
 
@@ -71,9 +228,12 @@ public final class ZramManager {
                 return 0L;
             }
 
-            return Long.parseLong(value.trim());
+            return Long.parseLong(
+                    value.trim()
+            );
 
         } catch (Exception e) {
+
             return 0L;
         }
     }
@@ -81,18 +241,18 @@ public final class ZramManager {
     public static boolean is8GiB() {
 
         return getConfiguredSizeBytes()
-                == ZRAM_SIZE_BYTES;
+                == EIGHT_GIB;
     }
 
     // ============================================================
     // ALGORITMO
     // ============================================================
 
-    public static String getAvailableAlgorithms() {
+    public static String getCompressionAlgorithms() {
 
         File file =
                 new File(
-                        ZRAM_SYS
+                        ZRAM
                                 + "/comp_algorithm"
                 );
 
@@ -104,29 +264,28 @@ public final class ZramManager {
 
             BufferedReader reader =
                     new BufferedReader(
-                            new java.io.FileReader(file)
+                            new FileReader(file)
                     );
 
-            String value = reader.readLine();
+            String result =
+                    reader.readLine();
 
             reader.close();
 
-            return value == null ? "" : value;
+            return result == null
+                    ? ""
+                    : result;
 
         } catch (Exception e) {
+
             return "";
         }
     }
 
-    /**
-     * Tenta selecionar zstd.
-     * Caso não exista, tenta lz4.
-     * Caso não exista, tenta lzo.
-     */
-    private static String chooseCompressionAlgorithm() {
+    private static String chooseAlgorithm() {
 
         String algorithms =
-                getAvailableAlgorithms();
+                getCompressionAlgorithms();
 
         if (algorithms.contains("zstd")) {
             return "zstd";
@@ -140,20 +299,21 @@ public final class ZramManager {
             return "lzo";
         }
 
-        if (algorithms.contains("lz4hc")) {
-            return "lz4hc";
-        }
-
         return "";
     }
 
     // ============================================================
-    // CONFIGURAR 8 GB
+    // CONFIGURAR 8 GiB
     // ============================================================
 
     public static boolean configure8GiB() {
 
-        if (!hasRoot()) {
+        if (!isShizukuAvailable()) {
+            return false;
+        }
+
+        if (!hasShizukuPermission()) {
+            requestPermission();
             return false;
         }
 
@@ -162,118 +322,119 @@ public final class ZramManager {
         }
 
         /*
-         * Primeiro tenta desativar o swap.
+         * Desativa o swap atual.
          */
-        executeRoot(
-                "swapoff " + ZRAM_DEVICE
-        );
+        CommandResult swapOff =
+                execute(
+                        "swapoff "
+                                + ZRAM_DEV
+                );
 
         /*
-         * Alguns kernels exigem reset antes
-         * de alterar o disksize.
+         * Reset da ZRAM.
          */
-        executeRoot(
-                "sh -c 'echo 1 > "
-                        + ZRAM_SYS
-                        + "/reset'"
-        );
+        CommandResult reset =
+                execute(
+                        "sh -c 'echo 1 > "
+                                + ZRAM
+                                + "/reset'"
+                );
 
         /*
-         * Seleciona algoritmo disponível.
+         * Escolhe algoritmo.
          */
         String algorithm =
-                chooseCompressionAlgorithm();
+                chooseAlgorithm();
 
         if (!algorithm.isEmpty()) {
 
-            executeRoot(
+            execute(
                     "sh -c 'echo "
                             + algorithm
                             + " > "
-                            + ZRAM_SYS
+                            + ZRAM
                             + "/comp_algorithm'"
             );
         }
 
         /*
-         * Configura 8 GiB.
+         * 8 GiB = 8589934592 bytes
          */
-        String sizeCommand =
-                "sh -c 'echo "
-                        + ZRAM_SIZE_BYTES
-                        + " > "
-                        + ZRAM_SYS
-                        + "/disksize'";
+        CommandResult size =
+                execute(
+                        "sh -c 'echo "
+                                + EIGHT_GIB
+                                + " > "
+                                + ZRAM
+                                + "/disksize'"
+                );
 
-        CommandResult sizeResult =
-                executeRoot(sizeCommand);
+        if (!size.success) {
 
-        if (!sizeResult.success) {
             return false;
         }
 
         /*
          * Formata como swap.
          */
-        CommandResult mkswap =
-                executeRoot(
+        CommandResult makeSwap =
+                execute(
                         "mkswap "
-                                + ZRAM_DEVICE
+                                + ZRAM_DEV
                 );
 
-        if (!mkswap.success) {
+        if (!makeSwap.success) {
+
             return false;
         }
 
         /*
-         * Ativa novamente.
+         * Ativa.
          */
-        CommandResult swapon =
-                executeRoot(
+        CommandResult swapOn =
+                execute(
                         "swapon "
-                                + ZRAM_DEVICE
+                                + ZRAM_DEV
                 );
 
-        if (!swapon.success) {
+        if (!swapOn.success) {
+
             return false;
         }
 
         /*
-         * Confirma o tamanho.
+         * Confirma no sysfs.
          */
         return is8GiB();
     }
 
     // ============================================================
-    // DESATIVAR
-    // ============================================================
-
-    public static boolean disable() {
-
-        if (!hasRoot()) {
-            return false;
-        }
-
-        CommandResult result =
-                executeRoot(
-                        "swapoff "
-                                + ZRAM_DEVICE
-                );
-
-        return result.success;
-    }
-
-    // ============================================================
-    // INFORMAÇÕES
+    // STATUS
     // ============================================================
 
     public static String getStatus() {
+
+        if (!isShizukuAvailable()) {
+
+            return "Shizuku: OFF";
+        }
+
+        if (!hasShizukuPermission()) {
+
+            return "Shizuku: sem permissão";
+        }
+
+        if (!exists()) {
+
+            return "ZRAM: não encontrada";
+        }
 
         long size =
                 getConfiguredSizeBytes();
 
         if (size <= 0) {
-            return "ZRAM: não configurada";
+
+            return "ZRAM: desativada";
         }
 
         return "ZRAM: "
@@ -282,21 +443,38 @@ public final class ZramManager {
 
     public static String getDetailedStatus() {
 
-        long size =
-                getConfiguredSizeBytes();
-
-        String algorithms =
-                getAvailableAlgorithms();
-
         StringBuilder result =
                 new StringBuilder();
 
-        result.append("ZRAM\n");
-        result.append("----------------\n");
+        result.append("BANNERLATOR ZRAM\n");
+        result.append("====================\n");
 
-        result.append("Dispositivo: ")
-                .append(ZRAM_DEVICE)
+        result.append("Shizuku: ")
+                .append(
+                        isShizukuAvailable()
+                                ? "OK"
+                                : "OFF"
+                )
                 .append("\n");
+
+        result.append("Permissão: ")
+                .append(
+                        hasShizukuPermission()
+                                ? "OK"
+                                : "NEGADA"
+                )
+                .append("\n");
+
+        result.append("zram0: ")
+                .append(
+                        exists()
+                                ? "OK"
+                                : "NÃO ENCONTRADA"
+                )
+                .append("\n");
+
+        long size =
+                getConfiguredSizeBytes();
 
         result.append("Tamanho: ")
                 .append(
@@ -304,170 +482,20 @@ public final class ZramManager {
                 )
                 .append("\n");
 
-        result.append("Algoritmos: ")
-                .append(algorithms)
-                .append("\n");
+        result.append("Alvo: 8.0 GiB\n");
 
-        result.append("8 GiB: ")
+        result.append("Configuração: ")
                 .append(
-                        size == ZRAM_SIZE_BYTES
-                                ? "SIM"
-                                : "NÃO"
+                        is8GiB()
+                                ? "8 GiB ATIVOS"
+                                : "NÃO CONFIGURADA"
                 )
                 .append("\n");
 
-        result.append("Root: ")
+        result.append("Algoritmos: ")
                 .append(
-                        hasRoot()
-                                ? "SIM"
-                                : "NÃO"
+                        getCompressionAlgorithms()
                 );
-
-        return result.toString();
-    }
-
-    // ============================================================
-    // COMANDOS
-    // ============================================================
-
-    private static CommandResult execute(
-            String command
-    ) {
-
-        return executeCommands(
-                false,
-                command
-        );
-    }
-
-    private static CommandResult executeRoot(
-            String command
-    ) {
-
-        return executeCommands(
-                true,
-                command
-        );
-    }
-
-    private static CommandResult executeCommands(
-            boolean root,
-            String... commands
-    ) {
-
-        List<String> output =
-                new ArrayList<>();
-
-        List<String> errors =
-                new ArrayList<>();
-
-        Process process = null;
-
-        try {
-
-            List<String> command =
-                    new ArrayList<>();
-
-            if (root) {
-                command.add("su");
-                command.add("-c");
-            }
-
-            StringBuilder shell =
-                    new StringBuilder();
-
-            for (String cmd : commands) {
-
-                if (shell.length() > 0) {
-                    shell.append(" && ");
-                }
-
-                shell.append(cmd);
-            }
-
-            if (root) {
-                command.add(shell.toString());
-            } else {
-                command.add("sh");
-                command.add("-c");
-                command.add(shell.toString());
-            }
-
-            ProcessBuilder builder =
-                    new ProcessBuilder(command);
-
-            builder.redirectErrorStream(false);
-
-            process = builder.start();
-
-            BufferedReader stdout =
-                    new BufferedReader(
-                            new InputStreamReader(
-                                    process.getInputStream()
-                            )
-                    );
-
-            BufferedReader stderr =
-                    new BufferedReader(
-                            new InputStreamReader(
-                                    process.getErrorStream()
-                            )
-                    );
-
-            String line;
-
-            while ((line = stdout.readLine()) != null) {
-                output.add(line);
-            }
-
-            while ((line = stderr.readLine()) != null) {
-                errors.add(line);
-            }
-
-            int exitCode =
-                    process.waitFor();
-
-            return new CommandResult(
-                    exitCode == 0,
-                    exitCode,
-                    join(output),
-                    join(errors)
-            );
-
-        } catch (Exception e) {
-
-            return new CommandResult(
-                    false,
-                    -1,
-                    "",
-                    e.getMessage() == null
-                            ? "Erro desconhecido"
-                            : e.getMessage()
-            );
-
-        } finally {
-
-            if (process != null) {
-                process.destroy();
-            }
-        }
-    }
-
-    private static String join(
-            List<String> lines
-    ) {
-
-        StringBuilder result =
-                new StringBuilder();
-
-        for (String line : lines) {
-
-            if (result.length() > 0) {
-                result.append('\n');
-            }
-
-            result.append(line);
-        }
 
         return result.toString();
     }
@@ -476,24 +504,33 @@ public final class ZramManager {
     // RESULTADO
     // ============================================================
 
-    private static final class CommandResult {
+    public static final class CommandResult {
 
-        final boolean success;
-        final int exitCode;
-        final String output;
-        final String error;
+        public final boolean success;
+        public final String output;
+        public final String error;
 
-        CommandResult(
+        public CommandResult(
                 boolean success,
-                int exitCode,
                 String output,
                 String error
         ) {
 
             this.success = success;
-            this.exitCode = exitCode;
             this.output = output;
             this.error = error;
         }
     }
-}
+
+    // ============================================================
+    // USER SERVICE
+    // ============================================================
+
+    public static class ZramUserService
+            extends ZramUserServiceStub {
+
+        public ZramUserService() {
+            super();
+        }
+    }
+    }
